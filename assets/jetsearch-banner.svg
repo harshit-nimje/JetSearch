@@ -1,0 +1,43 @@
+<svg width="1200" height="420" viewBox="0 0 1200 420" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1200" y2="420" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#101722"/>
+      <stop offset="1" stop-color="#17283A"/>
+    </linearGradient>
+    <linearGradient id="accent" x1="0" y1="0" x2="1" y2="1">
+      <stop stop-color="#A4F2FF"/>
+      <stop offset="1" stop-color="#48BFE3"/>
+    </linearGradient>
+    <linearGradient id="line" x1="0" y1="0" x2="1" y2="0">
+      <stop stop-color="#48BFE3" stop-opacity="0"/>
+      <stop offset=".5" stop-color="#48BFE3" stop-opacity=".8"/>
+      <stop offset="1" stop-color="#48BFE3" stop-opacity="0"/>
+    </linearGradient>
+    <filter id="glow" x="-100%" y="-100%" width="300%" height="300%">
+      <feGaussianBlur stdDeviation="18"/>
+    </filter>
+  </defs>
+  <rect width="1200" height="420" rx="28" fill="url(#bg)"/>
+  <circle cx="1000" cy="90" r="170" fill="#3CC8E8" opacity=".08" filter="url(#glow)"/>
+  <circle cx="1000" cy="90" r="130" stroke="#75DDF3" stroke-opacity=".12"/>
+  <circle cx="1000" cy="90" r="92" stroke="#75DDF3" stroke-opacity=".1"/>
+  <path d="M760 0V420M920 0V420M1080 0V420" stroke="#A8D8E8" stroke-opacity=".045"/>
+  <path d="M0 105H1200M0 210H1200M0 315H1200" stroke="#A8D8E8" stroke-opacity=".045"/>
+  <g transform="translate(82 72)">
+    <rect width="58" height="58" rx="15" fill="url(#accent)"/>
+    <path d="M17 15L31 29L17 43M29 43H42" stroke="#10202C" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+    <text x="78" y="41" fill="#F4FAFF" font-family="Inter,Segoe UI,Arial,sans-serif" font-size="34" font-weight="700" letter-spacing="-1.4">JetSearch</text>
+  </g>
+  <text x="82" y="222" fill="#F5FAFF" font-family="Inter,Segoe UI,Arial,sans-serif" font-size="68" font-weight="750" letter-spacing="-3">Find anything.</text>
+  <text x="82" y="298" fill="#72DDF5" font-family="Inter,Segoe UI,Arial,sans-serif" font-size="68" font-weight="750" letter-spacing="-3">Instantly.</text>
+  <rect x="84" y="338" width="420" height="2" rx="1" fill="url(#line)"/>
+  <text x="82" y="375" fill="#A8BACB" font-family="Inter,Segoe UI,Arial,sans-serif" font-size="17" letter-spacing="2.2">RUST  /  SLINT  /  RAYON</text>
+  <g transform="translate(865 145)">
+    <circle cx="70" cy="70" r="62" stroke="#77DFF4" stroke-opacity=".14" stroke-width="2"/>
+    <circle cx="70" cy="70" r="44" stroke="#77DFF4" stroke-opacity=".25" stroke-width="2"/>
+    <path d="M102 102L139 139" stroke="url(#accent)" stroke-width="12" stroke-linecap="round"/>
+    <circle cx="70" cy="70" r="27" fill="#45C3E3" fill-opacity=".12" stroke="#85E9F8" stroke-width="3"/>
+    <path d="M58 70H82M70 58V82" stroke="#B8F5FF" stroke-width="3" stroke-linecap="round"/>
+  </g>
+  <text x="864" y="342" fill="#A8BACB" font-family="Inter,Segoe UI,Arial,sans-serif" font-size="14" letter-spacing="2">LOCAL-FIRST SEARCH</text>
+</svg>
