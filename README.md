@@ -6,7 +6,7 @@
 
 **A lightweight desktop file search engine, built with Rust.**
 
-Search your filesystem with parallel indexing, ranked results, and a deliberately small footprint.
+Search your filesystem with parallel indexing, ranked results, and a focused desktop interface.
 
 <br>
 
