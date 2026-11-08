@@ -1,7 +1,12 @@
 //! Compact in-memory file index: one string arena for all names, 12-byte entries,
 //! one path string per directory. Searching is a parallel scan over the entries.
 use rayon::prelude::*;
-use std::{fs, path::Path, sync::Mutex};
+use std::{
+    collections::{HashMap, HashSet},
+    fs,
+    path::Path,
+    sync::Mutex,
+};
 
 const DIR: u8 = 1;
 const HIDDEN: u8 = 2;
@@ -11,6 +16,8 @@ const LIMIT: usize = 200;
 struct Entry {
     off: u32,
     dir: u32,
+    mtime: u32, // unix secs, 0 = unknown
+    size: u64,
     len: u16,
     flags: u8,
 }
@@ -25,7 +32,7 @@ pub struct Index {
 struct Chunk {
     dir: String,
     names: String,
-    meta: Vec<(u16, u8)>,
+    meta: Vec<(u16, u8, u64, u32)>,
 }
 
 #[derive(Clone, Copy)]
@@ -40,12 +47,71 @@ pub struct Hit {
     pub name: String,
     pub dir: String,
     pub is_dir: bool,
+    pub size: u64,
+    pub mtime: u32,
 }
 
 impl Hit {
     pub fn full(&self) -> String {
         Path::new(&self.dir).join(&self.name).to_string_lossy().into_owned()
     }
+}
+
+pub struct Row {
+    pub dir: String,
+    pub name: String,
+    pub flags: u8,
+    pub size: u64,
+    pub mtime: u32,
+}
+
+/// Difference between two index snapshots, keyed by (dir path, name).
+#[derive(Default)]
+pub struct Diff {
+    pub upsert: Vec<Row>,
+    pub removed: Vec<(String, String)>,
+    pub gone_dirs: Vec<String>,
+    pub added: usize,
+    pub changed: usize,
+    pub deleted: usize,
+}
+
+impl Diff {
+    pub fn is_empty(&self) -> bool {
+        self.upsert.is_empty() && self.deleted == 0 && self.gone_dirs.is_empty()
+    }
+    pub fn summary(&self) -> String {
+        format!("+{} ~{} -{}", self.added, self.changed, self.deleted)
+    }
+}
+
+pub fn diff(old: &Index, new: &Index) -> Diff {
+    let old_ids: HashMap<&str, u32> = old.dirs.iter().enumerate().map(|(i, d)| (d.as_str(), i as u32)).collect();
+    let new_dirs: HashSet<&str> = new.dirs.iter().map(String::as_str).collect();
+    let mut om: HashMap<(u32, &str), (u8, u64, u32)> =
+        old.entries.iter().map(|e| ((e.dir, old.name(e)), (e.flags, e.size, e.mtime))).collect();
+    let mut d = Diff::default();
+    for e in &new.entries {
+        let dir = new.dirs[e.dir as usize].as_str();
+        let name = new.name(e);
+        let prev = old_ids.get(dir).and_then(|&od| om.remove(&(od, name)));
+        let cur = (e.flags, e.size, e.mtime);
+        match prev {
+            Some(m) if m == cur => continue,
+            Some(_) => d.changed += 1,
+            None => d.added += 1,
+        }
+        d.upsert.push(Row { dir: dir.into(), name: name.into(), flags: e.flags, size: e.size, mtime: e.mtime });
+    }
+    d.deleted = om.len();
+    for ((od, name), _) in om {
+        let dir = old.dirs[od as usize].as_str();
+        if new_dirs.contains(dir) {
+            d.removed.push((dir.into(), name.into()));
+        }
+    }
+    d.gone_dirs = old.dirs.iter().filter(|p| !new_dirs.contains(p.as_str())).cloned().collect();
+    d
 }
 
 #[derive(Default)]
@@ -97,15 +163,22 @@ fn ext_of(name: &[u8]) -> &[u8] {
 }
 
 #[cfg(windows)]
-fn attrs(e: &fs::DirEntry, _: &str) -> u8 {
+fn attr_flags(m: &fs::Metadata, _: &str) -> u8 {
     use std::os::windows::fs::MetadataExt;
-    let a = e.metadata().map_or(0, |m| m.file_attributes());
+    let a = m.file_attributes();
     (if a & 0x2 != 0 { HIDDEN } else { 0 }) | (if a & 0x4 != 0 { SYSTEM } else { 0 })
 }
 
 #[cfg(not(windows))]
-fn attrs(_: &fs::DirEntry, name: &str) -> u8 {
+fn attr_flags(_: &fs::Metadata, name: &str) -> u8 {
     if name.starts_with('.') { HIDDEN } else { 0 }
+}
+
+fn mtime_of(m: &fs::Metadata) -> u32 {
+    m.modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map_or(0, |d| d.as_secs().min(u32::MAX as u64) as u32)
 }
 
 /// Walks one directory, then its subdirectories in parallel.
@@ -118,13 +191,16 @@ fn scan(dir: &Path, inherit: u8, out: &Mutex<Vec<Chunk>>) {
         let Ok(ft) = e.file_type() else { continue };
         let name = e.file_name();
         let name = name.to_string_lossy();
-        let mut flags = attrs(&e, &name) | inherit;
+        // one metadata call: free on Windows (comes with the directory listing)
+        let md = e.metadata().ok();
+        let mut flags = md.as_ref().map_or(0, |m| attr_flags(m, &name)) | inherit;
+        let (size, mtime) = md.as_ref().map_or((0, 0), |m| (if ft.is_dir() { 0 } else { m.len() }, mtime_of(m)));
         // file_type() does not follow symlinks/junctions, so there are no directory loops
         if ft.is_dir() {
             subs.push((e.path(), flags & (HIDDEN | SYSTEM)));
             flags |= DIR;
         }
-        c.meta.push((name.len() as u16, flags));
+        c.meta.push((name.len() as u16, flags, size, mtime));
         c.names.push_str(&name);
     }
     out.lock().unwrap().push(c);
@@ -152,6 +228,28 @@ pub fn roots() -> Vec<String> {
 }
 
 impl Index {
+    /// (dir id, name, flags) for every entry, for persistence.
+    pub fn rows(&self) -> impl Iterator<Item = (u32, &str, u8, u64, u32)> + '_ {
+        self.entries.iter().map(|e| (e.dir, self.name(e), e.flags, e.size, e.mtime))
+    }
+
+    pub fn dirs(&self) -> &[String] {
+        &self.dirs
+    }
+
+    /// Rebuild from persisted parts. Rows must reference valid dir ids.
+    pub fn from_parts(dirs: Vec<String>, rows: impl Iterator<Item = (u32, String, u8, u64, u32)>) -> Self {
+        let mut ix = Index { dirs, ..Index::default() };
+        for (dir, name, flags, size, mtime) in rows {
+            let off = ix.names.len() as u32;
+            ix.names.push_str(&name);
+            ix.entries.push(Entry { off, dir, len: name.len() as u16, flags, size, mtime });
+        }
+        ix.names.shrink_to_fit();
+        ix.entries.shrink_to_fit();
+        ix
+    }
+
     pub fn len(&self) -> usize {
         self.entries.len()
     }
@@ -170,8 +268,8 @@ impl Index {
             let dir = ix.dirs.len() as u32;
             let mut off = ix.names.len() as u32;
             ix.names.push_str(&c.names);
-            for (len, flags) in c.meta {
-                ix.entries.push(Entry { off, dir, len, flags });
+            for (len, flags, size, mtime) in c.meta {
+                ix.entries.push(Entry { off, dir, len, flags, size, mtime });
                 off += len as u32;
             }
             ix.dirs.push(c.dir);
@@ -184,13 +282,21 @@ impl Index {
     }
 
     pub fn search(&self, q: &str, o: &Opts) -> Found {
+        self.search_with(q, o, &|| false).unwrap_or_default()
+    }
+
+    /// Like `search`, but returns None as soon as `cancel()` turns true.
+    pub fn search_with(&self, q: &str, o: &Opts, cancel: &(dyn Fn() -> bool + Sync)) -> Option<Found> {
         let q = Query::parse(q, o.case);
         if q.inc.is_empty() && q.ext.is_empty() {
-            return Found::default();
+            return Some(Found::default());
         }
-        let mut v = self.run(&q, o, false);
-        if v.is_empty() && q.inc.len() == 1 && q.inc[0].len() >= 3 {
-            v = self.run(&q, o, true);
+        let mut v = self.run(&q, o, false, cancel);
+        if v.is_empty() && q.inc.len() == 1 && q.inc[0].len() >= 3 && !cancel() {
+            v = self.run(&q, o, true, cancel);
+        }
+        if cancel() {
+            return None;
         }
         let total = v.len();
         if total > LIMIT {
@@ -202,20 +308,23 @@ impl Index {
             .iter()
             .map(|&(_, i)| {
                 let e = &self.entries[i as usize];
-                Hit { name: self.name(e).into(), dir: self.dirs[e.dir as usize].clone(), is_dir: e.flags & DIR != 0 }
+                Hit { name: self.name(e).into(), dir: self.dirs[e.dir as usize].clone(), is_dir: e.flags & DIR != 0, size: e.size, mtime: e.mtime }
             })
             .collect();
-        Found { hits, total }
+        Some(Found { hits, total })
     }
 
     /// Returns (rank key, entry index). Rank: exact name < prefix < word start < inside a word < path-only match,
     /// then shorter names first.
-    fn run(&self, q: &Query, o: &Opts, fuzzy: bool) -> Vec<(u32, u32)> {
+    fn run(&self, q: &Query, o: &Opts, fuzzy: bool, cancel: &(dyn Fn() -> bool + Sync)) -> Vec<(u32, u32)> {
         let m = |h: &[u8], n: &[u8]| if fuzzy { subseq(h, n, o.case).then_some(1) } else { find(h, n, o.case) };
         self.entries
             .par_iter()
             .enumerate()
             .filter_map(|(i, e)| {
+                if cancel() {
+                    return None;
+                }
                 if (e.flags & HIDDEN != 0 && !o.hidden) || (e.flags & SYSTEM != 0 && !o.system) {
                     return None;
                 }

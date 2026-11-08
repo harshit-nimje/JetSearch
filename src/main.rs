@@ -1,19 +1,35 @@
 #![cfg_attr(all(not(debug_assertions), windows), windows_subsystem = "windows")]
-mod index;
-
-use index::{Index, Opts};
+use jetsearch::{
+    index::{self, Found, Index, Opts},
+    storage,
+    worker::SearchWorker,
+};
 use slint::{ModelRc, VecModel};
 use std::{
     cell::RefCell,
+    sync::atomic::{AtomicU64, Ordering},
     fs,
     path::PathBuf,
     sync::{Arc, RwLock},
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 slint::include_modules!();
 
 type Shared = Arc<RwLock<Arc<Index>>>;
+
+/// Bumped per rescan; a finishing scan from an older generation is discarded.
+static SCAN_GEN: AtomicU64 = AtomicU64::new(0);
+/// Set when a DB write failed: next save does a full replace instead of a diff.
+static DB_DIRTY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+fn db_path() -> Option<PathBuf> {
+    let base = std::env::var_os("LOCALAPPDATA")
+        .or_else(|| std::env::var_os("XDG_DATA_HOME"))
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/share")))?;
+    Some(base.join("JetSearch").join("index.sqlite"))
+}
 
 thread_local! {
     // full paths of the rows on screen; only touched on the UI thread
@@ -24,41 +40,76 @@ fn opts(ui: &AppWindow) -> Opts {
     Opts { case: ui.get_match_case(), path: ui.get_search_path(), hidden: ui.get_show_hidden(), system: ui.get_show_system() }
 }
 
-fn refresh(ui: &AppWindow, idx: &Index) {
-    let q = ui.get_query();
-    if q.trim().is_empty() || idx.len() == 0 {
+thread_local! {
+    // status line shown when the query box is empty
+    static IDLE: RefCell<String> = RefCell::default();
+}
+
+/// Runs on the UI thread. Applies one finished search to the window.
+fn show(ui: &AppWindow, f: Found, took: Duration, n: usize) {
+    if ui.get_query().trim().is_empty() || n == 0 {
         PATHS.with(|p| p.borrow_mut().clear());
         ui.set_rows(ModelRc::default());
-        let n = idx.len();
-        ui.set_status(if n == 0 { "Indexing…".into() } else { format!("{n} items indexed").into() });
+        let idle = IDLE.with(|i| i.borrow().clone());
+        ui.set_status(if n == 0 { "Indexing…".into() } else if idle.is_empty() { format!("{n} items indexed") } else { idle }.into());
         return;
     }
-    let t = Instant::now();
-    let f = idx.search(&q, &opts(ui));
     PATHS.with(|p| *p.borrow_mut() = f.hits.iter().map(|h| h.full()).collect());
     let rows: Vec<FileRow> =
         f.hits.iter().map(|h| FileRow { name: h.name.clone().into(), dir: h.dir.clone().into(), is_dir: h.is_dir }).collect();
     ui.set_rows(ModelRc::new(VecModel::from(rows)));
     let shown = f.hits.len();
-    let ms = t.elapsed().as_millis();
+    let ms = took.as_millis();
     ui.set_status(if f.total > shown { format!("Showing {shown} of {} · {ms} ms", f.total) } else { format!("{} results · {ms} ms", f.total) }.into());
 }
 
-fn rescan(ui: &AppWindow, shared: &Shared) {
-    // drop the old index first so two indexes never sit in RAM at once
-    *shared.write().unwrap() = Arc::default();
-    refresh(ui, &Index::default());
-    let (weak, shared) = (ui.as_weak(), shared.clone());
+/// Queue a search for the current UI state; never blocks.
+fn request(ui: &AppWindow, w: &SearchWorker) {
+    w.submit(ui.get_query().to_string(), opts(ui));
+}
+
+fn rescan(ui: &AppWindow, shared: &Shared, worker: &Arc<SearchWorker>) {
+    let gen = SCAN_GEN.fetch_add(1, Ordering::SeqCst) + 1;
+    // keep serving the previous (persisted) index until the new one is ready
+    ui.set_status(format!("{} items · rescanning…", shared.read().unwrap().len()).into());
+    let (weak, shared, worker) = (ui.as_weak(), shared.clone(), worker.clone());
+    // previous snapshot, needed to diff against; both indexes coexist in RAM until the scan ends
+    let old = shared.read().unwrap().clone();
     std::thread::spawn(move || {
         let t = Instant::now();
         let idx = Arc::new(Index::build(&index::roots()));
+        if SCAN_GEN.load(Ordering::SeqCst) != gen {
+            return; // superseded by a newer rescan
+        }
         *shared.write().unwrap() = idx.clone();
+        let mut err = None;
+        let mut change = None;
+        if let Some(p) = db_path() {
+            let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64);
+            let r = storage::open(&p).and_then(|mut c| {
+                if old.len() == 0 || DB_DIRTY.load(Ordering::SeqCst) {
+                    storage::save(&mut c, &idx, now)
+                } else {
+                    let d = index::diff(&old, &idx);
+                    change = Some(d.summary());
+                    storage::apply(&mut c, &d, now)
+                }
+            });
+            DB_DIRTY.store(r.is_err(), Ordering::SeqCst);
+            err = r.err().map(|e| e.to_string());
+        }
+        drop(old);
         let secs = t.elapsed().as_secs_f32();
         weak.upgrade_in_event_loop(move |ui| {
-            refresh(&ui, &idx);
-            if ui.get_query().trim().is_empty() {
-                ui.set_status(format!("{} items indexed in {secs:.1}s", idx.len()).into());
-            }
+            let msg = match err {
+                Some(e) => format!("{} items indexed in {secs:.1}s · save failed: {e}", idx.len()),
+                None => match change {
+                    Some(c) => format!("{} items · scan {secs:.1}s · changes {c}", idx.len()),
+                    None => format!("{} items indexed in {secs:.1}s", idx.len()),
+                },
+            };
+            IDLE.with(|i| *i.borrow_mut() = msg);
+            request(&ui, &worker); // re-run the current query against the new index
         })
         .ok();
     });
@@ -70,7 +121,7 @@ fn open(path: &str, reveal: bool) {
         use std::os::windows::process::CommandExt;
         let mut c = std::process::Command::new("explorer.exe");
         if reveal {
-            c.raw_arg(format!("/select,\"{path}\""));
+            c.raw_arg(format!("/select,\"{path}\"));
         } else {
             c.arg(path);
         }
@@ -125,19 +176,38 @@ fn main() -> Result<(), slint::PlatformError> {
     let ui = AppWindow::new()?;
     load(&ui);
     let shared = Shared::default();
+    // instant start from the persisted index; a background rescan then refreshes it
+    if let Some(ix) = db_path().filter(|p| p.exists()).and_then(|p| storage::open(&p).ok()).and_then(|c| storage::load(&c).ok().flatten()) {
+        *shared.write().unwrap() = Arc::new(ix);
+    }
 
-    let (w, s) = (ui.as_weak(), shared.clone());
-    ui.on_query_changed(move || refresh(&w.unwrap(), &s.read().unwrap()));
+    let weak = ui.as_weak();
+    let latest: Arc<AtomicU64> = Arc::new(AtomicU64::new(0));
+    let (lw, sh) = (latest.clone(), shared.clone());
+    let worker = Arc::new(SearchWorker::new(shared.clone(), latest, move |gen, found, took| {
+        let (lw, sh) = (lw.clone(), sh.clone());
+        weak.upgrade_in_event_loop(move |ui| {
+            // drop results that were superseded while waiting for the UI thread
+            if lw.load(Ordering::SeqCst) == gen {
+                let n = sh.read().unwrap().len();
+                show(&ui, found, took, n);
+            }
+        })
+        .ok();
+    }));
 
-    let (w, s) = (ui.as_weak(), shared.clone());
+    let (w, k) = (ui.as_weak(), worker.clone());
+    ui.on_query_changed(move || request(&w.unwrap(), &k));
+
+    let (w, k) = (ui.as_weak(), worker.clone());
     ui.on_settings_changed(move || {
         let ui = w.unwrap();
         save(&ui);
-        refresh(&ui, &s.read().unwrap());
+        request(&ui, &k);
     });
 
-    let (w, s) = (ui.as_weak(), shared.clone());
-    ui.on_rescan(move || rescan(&w.unwrap(), &s));
+    let (w, s, k) = (ui.as_weak(), shared.clone(), worker.clone());
+    ui.on_rescan(move || rescan(&w.unwrap(), &s, &k));
 
     ui.on_open_item(|i| {
         if let Some(p) = PATHS.with(|p| p.borrow().get(i as usize).cloned()) {
@@ -150,6 +220,9 @@ fn main() -> Result<(), slint::PlatformError> {
         }
     });
 
-    rescan(&ui, &shared);
-    ui.run()
+    request(&ui, &worker);
+    rescan(&ui, &shared, &worker);
+    let r = ui.run();
+    SCAN_GEN.fetch_add(1, Ordering::SeqCst);
+    r
 }

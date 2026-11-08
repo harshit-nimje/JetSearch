@@ -5,11 +5,21 @@ edition = "2021"
 
 [dependencies]
 rayon = "1"
+rusqlite = { version = "0.31", features = ["bundled"] }
 # software renderer = no GPU/OpenGL context, much lower RAM than the default femtovg renderer
-slint = { version = "1", default-features = false, features = ["std", "compat-1-2", "backend-winit", "renderer-software", "software-renderer-systemfonts", "accessibility"] }
+slint = { optional = true, version = "1", default-features = false, features = ["std", "compat-1-2", "backend-winit", "renderer-software", "software-renderer-systemfonts", "accessibility"] }
 
 [build-dependencies]
-slint-build = "1"
+slint-build = { version = "1", optional = true }
+
+[[bin]]
+name = "jetsearch"
+path = "src/main.rs"
+required-features = ["gui"]
+
+[features]
+default = ["gui"]
+gui = ["dep:slint", "dep:slint-build"]
 
 [profile.release]
 opt-level = 3
