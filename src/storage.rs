@@ -156,6 +156,7 @@ mod tests {
         assert_eq!(rowset(&back), rowset(&ix)); // includes size + mtime
         let h = back.search("alpha", &ALL).hits.remove(0);
         assert_eq!((h.name.as_str(), h.size), ("alpha report.txt", 1234));
+        drop(c); // Windows cannot remove an open SQLite database (or its WAL files).
         fs::remove_dir_all(&base).unwrap();
     }
 
@@ -176,6 +177,7 @@ mod tests {
         let c = open(&dbp).unwrap();
         assert!(load(&c).unwrap().is_none()); // cache dropped, rescan rebuilds
         assert_eq!(c.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0)).unwrap(), SCHEMA_VERSION);
+        drop(c); // Release the SQLite file handle before deleting the temp directory on Windows.
         fs::remove_dir_all(&base).unwrap();
     }
 
@@ -213,6 +215,7 @@ mod tests {
         assert!(diff(&b, &b).is_empty());
         // applying again from the stored state on an unchanged tree is a no-op
         assert!(diff(&back, &b).is_empty());
+        drop(c); // Close SQLite and its WAL handles before Windows directory cleanup.
         fs::remove_dir_all(&base).unwrap();
     }
 }
