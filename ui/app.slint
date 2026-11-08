@@ -1,0 +1,110 @@
+import { LineEdit, Switch, Button, ListView, Palette } from "std-widgets.slint";
+
+export struct FileRow { name: string, dir: string, is-dir: bool }
+
+export component AppWindow inherits Window {
+    title: "JetSearch";
+    preferred-width: 900px;
+    preferred-height: 640px;
+    min-width: 520px;
+    min-height: 360px;
+    background: Palette.background;
+
+    in property <[FileRow]> rows;
+    in property <string> status;
+    in-out property <string> query;
+    in-out property <bool> match-case;
+    in-out property <bool> search-path;
+    in-out property <bool> show-hidden;
+    in-out property <bool> show-system;
+    property <bool> panel-open;
+
+    callback query-changed();
+    callback settings-changed();
+    callback rescan();
+    callback open-item(int);
+    callback reveal-item(int);
+
+    init => { input.focus(); }
+
+    VerticalLayout {
+        padding: 16px;
+        spacing: 12px;
+
+        HorizontalLayout {
+            spacing: 8px;
+            input := LineEdit {
+                placeholder-text: "Search files and folders      ext:pdf   -exclude";
+                text <=> root.query;
+                font-size: 16px;
+                edited => { root.query-changed(); }
+                accepted => { root.open-item(0); }
+            }
+            Button {
+                text: root.panel-open ? "Close" : "Settings";
+                clicked => { root.panel-open = !root.panel-open; }
+            }
+        }
+
+        if root.panel-open: Rectangle {
+            background: Palette.alternate-background;
+            border-radius: 8px;
+            border-width: 1px;
+            border-color: Palette.border;
+            VerticalLayout {
+                padding: 12px;
+                spacing: 8px;
+                GridLayout {
+                    spacing: 8px;
+                    Row {
+                        Switch { text: "Match case"; checked <=> root.match-case; toggled => { root.settings-changed(); } }
+                        Switch { text: "Search in folder path"; checked <=> root.search-path; toggled => { root.settings-changed(); } }
+                    }
+                    Row {
+                        Switch { text: "Show hidden files"; checked <=> root.show-hidden; toggled => { root.settings-changed(); } }
+                        Switch { text: "Show system files"; checked <=> root.show-system; toggled => { root.settings-changed(); } }
+                    }
+                }
+                HorizontalLayout {
+                    Button { text: "Rescan drives"; clicked => { root.rescan(); } }
+                    Rectangle { }
+                }
+            }
+        }
+
+        ListView {
+            vertical-stretch: 1;
+            for r[i] in root.rows: Rectangle {
+                height: 48px;
+                border-radius: 6px;
+                background: ta.has-hover ? Palette.alternate-background : transparent;
+                ta := TouchArea { double-clicked => { root.open-item(i); } }
+                HorizontalLayout {
+                    padding-left: 10px;
+                    padding-right: 6px;
+                    spacing: 10px;
+                    VerticalLayout {
+                        alignment: center;
+                        Rectangle {
+                            width: 8px;
+                            height: 8px;
+                            border-radius: 4px;
+                            background: r.is-dir ? Palette.accent-background : Palette.border;
+                        }
+                    }
+                    VerticalLayout {
+                        alignment: center;
+                        Text { text: r.name; color: Palette.foreground; font-size: 14px; overflow: elide; }
+                        Text { text: r.dir; color: Palette.foreground.with-alpha(0.55); font-size: 11px; overflow: elide; }
+                    }
+                    VerticalLayout {
+                        alignment: center;
+                        Button { text: "Show"; clicked => { root.reveal-item(i); } }
+                    }
+                }
+            }
+        }
+
+        Text { text: root.status; color: Palette.foreground.with-alpha(0.6); font-size: 12px; }
+    }
+}
