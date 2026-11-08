@@ -121,7 +121,7 @@ fn open(path: &str, reveal: bool) {
         use std::os::windows::process::CommandExt;
         let mut c = std::process::Command::new("explorer.exe");
         if reveal {
-            c.raw_arg(format!("/select,\"{path}\"));
+            c.raw_arg(format!("/select,\"{path}\""));
         } else {
             c.arg(path);
         }
