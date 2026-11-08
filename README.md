@@ -6,7 +6,7 @@
 
 **A lightweight desktop file search engine, built with Rust.**
 
-Search your filesystem with parallel indexing, ranked results, and a focused desktop interface.
+Search your filesystem with parallel indexing, ranked results, a persistent SQLite cache, and a responsive desktop search worker.
 
 <br>
 
@@ -32,6 +32,9 @@ The project is under active development. Features below describe the current sou
 ## ✨ What it does
 
 - **Parallel filesystem indexing** — walks directory trees using Rayon.
+- **Persistent index cache** — stores file metadata in SQLite so JetSearch can load the previous index immediately on startup.
+- **Incremental cache updates** — compares scans and writes only added, changed, and removed entries.
+- **Non-blocking search** — runs queries on a background worker and cancels superseded searches.
 - **Fast in-memory matching** — searches indexed names instead of re-reading the filesystem for each query.
 - **Multi-term queries** — all included terms must match.
 - **Typo-tolerant fallback** — tries ordered-character matching when a single-term search has no direct match.
@@ -69,6 +72,7 @@ Search options in the Settings panel:
 | [Rust](https://www.rust-lang.org/) | Core application and indexing engine |
 | [Slint](https://slint.dev/) | Native desktop UI |
 | [Rayon](https://github.com/rayon-rs/rayon) | Data-parallel filesystem traversal and search |
+| [SQLite](https://www.sqlite.org/) via [rusqlite](https://github.com/rusqlite/rusqlite) | Persistent index cache and transactional updates |
 
 The release profile enables optimization, link-time optimization, a single codegen unit, and binary stripping.
 
@@ -93,7 +97,7 @@ cargo run
 ### Build an optimized binary
 
 ```bash
-cargo build --release --locked
+cargo build --release
 ```
 
 The executable is written to:
@@ -104,7 +108,7 @@ The executable is written to:
 ### Tests
 
 ```bash
-cargo test --locked
+cargo test
 ```
 
 The repository currently includes unit tests for search filtering, ranking, path matching, and fuzzy fallback.
@@ -129,7 +133,10 @@ JetSearch/
 ├── assets/
 │   └── jetsearch-banner.svg
 ├── src/
-│   ├── index.rs            # Filesystem index and query engine
+│   ├── index.rs            # Filesystem index, diffing, and query engine
+│   ├── storage.rs          # SQLite persistence and incremental updates
+│   ├── worker.rs           # Background, cancellable search worker
+│   ├── lib.rs              # Shared library modules
 │   └── main.rs             # Application state and UI integration
 ├── ui/
 │   └── app.slint           # Desktop interface
